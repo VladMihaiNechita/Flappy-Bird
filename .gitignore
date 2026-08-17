@@ -7,3 +7,5 @@ __pycache__/
 .DS_Store
 Thumbs.db
 
+# Local checkpoints produced by the incremental LIDAR ablation harness.
+models/lidar_ablation/

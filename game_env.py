@@ -33,3 +33,14 @@ def make_env(render_mode=None, score_limit: int = 100):
         disable_env_checker=True,
     )
     return SafeObservation(env)
+
+
+def make_lidar_env(render_mode=None, score_limit: int = 100):
+    env = gymnasium.make(
+        "FlappyBird-v0",
+        render_mode=render_mode,
+        use_lidar=True,
+        score_limit=score_limit,
+        disable_env_checker=True,
+    )
+    return SafeObservation(env)

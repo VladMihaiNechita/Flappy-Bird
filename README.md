@@ -1,24 +1,26 @@
 # Flappy Bird Agents
 
-A compact reinforcement-learning project that compares four ways to play
-Flappy Bird from the environment's 12 numerical state values:
+A reinforcement-learning project that compares five ways to play Flappy Bird
+from numerical observations:
 
 - a model-based beam-search planner;
-- a Double DQN trained from scratch;
+- a compact Double DQN trained from scratch;
+- a LIDAR Double DQN trained from scratch;
 - a PPO baseline trained from scratch;
 - an improved PPO policy initialized from planner demonstrations.
 
 The project uses
-[`flappy-bird-gymnasium`](https://github.com/markub3327/flappy-bird-gymnasium)
-with `use_lidar=False`. No agent reads screen pixels or the 180-value LIDAR
-observation.
+[`flappy-bird-gymnasium`](https://github.com/markub3327/flappy-bird-gymnasium).
+Most agents use the compact 12-value state, while the separate LIDAR agent uses
+all 180 distance sensors. No agent reads screen pixels.
 
 ## Results
 
 | Agent | Learning method | Episodes | Score cap | Mean | Median | Maximum |
 |---|---|---:|---:|---:|---:|---:|
 | Model-based planner | Beam search, no training | 5 | 1,100 | **810.60** | **1,100** | **1,100** |
-| Scratch Double DQN | Replay-based RL | 100 | 200 | 33.73 | 25 | 158 |
+| Compact scratch Double DQN | Replay-based RL | 100 | 200 | 33.73 | 25 | 158 |
+| Improved LIDAR scratch Double DQN | Temporal 1D convolution + replay RL | 100 | 200 | **42.08** | **29.5** | **200** |
 | Improved PPO | Planner imitation, then PPO | 50 | 200 | 6.76 | 4 | 38 |
 | Original PPO | PPO from scratch | 50 | 100 | 5.30 | 4 | 28 |
 
@@ -26,7 +28,9 @@ The benchmark protocols are shown because the planner and learned agents were
 evaluated with different score limits. Scores are measured on seeded evaluation
 episodes, and neural-network results can vary when training is repeated.
 
-## The 12 input values
+## Observation modes
+
+### Compact: 12 values
 
 The compact state contains three values for each of three pipes:
 
@@ -37,6 +41,14 @@ The compact state contains three values for each of three pipes:
 The final three values are the bird's vertical position, vertical velocity, and
 rotation. Explicit vertical velocity makes this compact state suitable for a
 feed-forward neural network.
+
+### LIDAR: 180 sensors
+
+The LIDAR mode returns 180 normalized obstacle distances around the bird. A
+single scan does not explicitly reveal vertical velocity. The improved agent's
+`(4, 180)` input contains the current proximity scan (`1 - distance`) and three
+successive temporal-difference channels. It is still derived exclusively from
+the 180 sensors.
 
 ## Installation
 
@@ -95,6 +107,30 @@ All three were evaluated on the same 30 unseen seeds. A 50/50 random policy was
 intentionally excluded because excessive random flapping produces poor
 exploration trajectories.
 
+### LIDAR scratch Double DQN
+
+The LIDAR agent uses the current 180-ray proximity scan, temporal differences,
+and a one-dimensional convolutional network. It starts with random weights and
+an empty replay memory. Exploratory flap triggers use a 20% probability followed
+by a two-frame cooldown, preventing consecutive random flaps.
+
+```powershell
+python lidar_dqn_agent.py play
+python lidar_dqn_agent.py evaluate --episodes 100 --score-limit 200
+python lidar_dqn_agent.py train --steps 500000 --fresh
+```
+
+The final training run collected 500,000 transitions using eight parallel
+headless games. Periodic seeded evaluation selected its more consistent 350,000
+transition checkpoint instead of the final weights. On 100 entirely fresh seeds
+it scored mean 42.08, median 29.5, minimum 3, and maximum 200.
+
+Incremental tests kept temporal differences, three-step returns, structured
+exploration, checkpoint selection, and longer training. Dueling heads,
+prioritized replay, clearance shaping, 10%/15% flap triggers, and a recurrent
+encoder were rejected because they did not improve held-out performance enough
+to justify their complexity or training cost.
+
 ### Improved PPO
 
 The improved PPO first learns to imitate planner demonstrations and is then
@@ -136,6 +172,14 @@ comes first and pipe positions are represented relative to the bird. Training
 uses a 100,000-transition replay buffer, batches of 128, and dense reward
 feedback for survival, gap alignment, passed pipes, and collisions.
 
+### LIDAR Double DQN
+
+The LIDAR network applies three 1D convolution layers across the proximity and
+temporal-difference channels, projects the result to 256 features, and estimates
+idle/flap values with Double DQN. Its 50,000-step replay buffer stores batches
+of 128 transitions. Three-step targets propagate rewards faster, and structured
+exploration prevents consecutive random flaps.
+
 ### PPO
 
 PPO directly learns action probabilities and a state-value estimate. The
@@ -152,6 +196,8 @@ hyperparameters, reward design, and results for every agent.
 |-- compact_planner.py        Beam-search controller
 |-- planner_agent.py          Planner play and evaluation commands
 |-- dqn_agent.py              Biased-exploration Double DQN
+|-- lidar_dqn_agent.py        180-sensor convolutional Double DQN
+|-- lidar_ablation.py         Incremental LIDAR experiment harness
 |-- ppo_agent.py              Imitation-pretrained PPO
 |-- main.py                   Original PPO baseline
 |-- game_env.py               Shared compact environment setup
@@ -164,7 +210,8 @@ hyperparameters, reward design, and results for every agent.
 
 - `dqn_scratch_best.zip`: winning 80/20 Double DQN;
 - `dqn_scratch_flap_10.zip`, `20.zip`, and `30.zip`: exploration experiments;
+- `lidar_dqn_scratch.zip`: original 180-sensor baseline;
+- `lidar_dqn_improved.zip`: accepted improved 180-sensor Double DQN;
 - `compact_ppo.zip`: original PPO;
 - `compact_ppo_pretrained.zip`: imitation checkpoint;
 - `compact_ppo_improved.zip`: fine-tuned PPO.
-

@@ -1,11 +1,12 @@
 FLAPPY BIRD AGENTS - METHOD EXPLANATION
 =======================================
 
-1. Shared 12-value observation
-------------------------------
+1. Observation modes
+--------------------
 
-All agents described here use the compact observation mode (use_lidar=False).
-They do not use the 180 LIDAR rays or screen pixels.
+No agent reads screen pixels. Four variants use the compact observation mode
+(use_lidar=False), and the LIDAR Double DQN uses the 180-sensor mode
+(use_lidar=True).
 
 The 12 values are:
 
@@ -25,11 +26,17 @@ whether the bird is moving up or down.
 game_env.py contains the shared environment setup. Training runs without a game
 window for speed; play mode creates a visible window.
 
+The LIDAR mode contains 180 normalized distances from the bird to obstacles.
+One scan does not explicitly contain vertical velocity. The improved LIDAR
+agent converts distance to proximity and supplies explicit changes between
+successive scans. Tiny floating-point values above the declared maximum are
+clipped safely.
+
 
 2. Agent summary
 ----------------
 
-This project contains four agent variants:
+This project contains five agent variants:
 
   1. Original PPO (main.py)
      A neural-network reinforcement-learning baseline trained from scratch.
@@ -45,6 +52,11 @@ This project contains four agent variants:
      A new neural-network agent that learns only through game interaction. Its
      random exploration is biased toward action 0 (idle), instead of using the
      poor 50/50 idle/flap distribution.
+
+  5. LIDAR scratch Double DQN (lidar_dqn_agent.py)
+     A convolutional Double DQN that learns from proximity and temporal changes
+     in the 180 sensors, without compact features, demonstrations, or physics
+     knowledge.
 
 
 3. Original PPO agent
@@ -268,15 +280,117 @@ Commands:
     python dqn_agent.py train --flap-probability 0.2 --steps 300000
 
 
-9. Which agent should be used?
-------------------------------
+9. LIDAR scratch Double DQN agent
+--------------------------------
+
+The agent in lidar_dqn_agent.py starts with random neural-network weights and
+an empty replay memory. Its only observations are the 180 LIDAR distances.
+
+A single scan cannot distinguish some states where the bird is at the same
+position but moving in opposite directions. The accepted preprocessing converts
+distance to proximity and supplies an observation with shape (4, 180):
+
+  - Current proximity: 1 minus current distance
+  - Current proximity minus previous proximity
+  - Previous proximity minus the proximity before it
+  - The preceding proximity difference
+
+This retains only LIDAR-derived information while making motion explicit.
+
+The feature extractor treats the rays as a one-dimensional signal:
+
+  - Convolution with 32 channels
+  - Convolution with 64 channels
+  - A second convolution with 64 channels
+  - Projection to 256 learned features
+  - A 256-neuron Q-value layer for idle and flap
+
+Convolutions are useful because neighboring rays usually describe neighboring
+parts of the same obstacle. The agent then uses the same Double DQN target rule
+as the compact scratch agent.
+
+Training configuration:
+
+  - 500,000 collected transitions from random initial weights
+  - Eight parallel headless game environments
+  - Replay memory of 50,000 transitions
+  - Batch size of 128
+  - Learning rate of 0.0002
+  - Learning begins after 5,000 transitions
+  - Target-network update every 2,000 transitions
+  - Discount factor of 0.99
+  - Three-step Double DQN targets
+  - Random flap trigger probability of 20 percent
+  - Two forced idle frames after each exploratory flap
+  - Epsilon decreases from 100 percent to 5 percent
+  - Score evaluation and checkpoint selection every 50,000 transitions
+
+The training reward remains -5 for collision and +5 for passing a pipe. At
+other steps, the agent keeps the environment's LIDAR reward. The tested
+clearance-shaping reward was rejected, so no compact pipe positions or custom
+clearance potential are used by the final agent.
+
+Incremental screening used identical training seeds, 150,000 transitions, ten
+checkpoint-validation seeds, and twenty held-out screening seeds. An
+improvement was kept only when it improved median score, or improved mean by at
+least 10 percent without reducing median.
+
+  Candidate                         Mean   Median   Maximum   Decision
+  -------------------------------  ------  ------   -------   --------
+  Raw four-frame baseline            4.80     3.0       12    Baseline
+  Proximity plus temporal changes     9.45     6.0       36    Keep
+  Add dueling head                    9.30     6.0       28    Reject
+  Add prioritized replay              3.70     2.5        9    Reject
+  Add three-step returns              10.00    10.0       26    Keep
+  Structured exploration, 20%         13.55    13.5       31    Keep
+  Structured exploration, 10%          6.45     5.5       14    Reject
+  Structured exploration, 15%         10.30     8.0       35    Reject
+  Add LIDAR clearance shaping           9.15     6.0       48    Reject
+
+The recurrent candidate was stopped after its 30,000-step checkpoint. It scored
+mean 0.8 and median 1 while training about eight times more slowly and
+saturating the GPU. This was not enough benefit to justify completing the full
+run, so temporal-difference channels were retained.
+
+The accepted configuration was then trained for 500,000 transitions. The
+350,000-transition checkpoint was selected because later weights became less
+consistent. It scored mean 38.85, median 24, minimum 2, and maximum 186 on the
+twenty held-out screening seeds.
+
+The final checkpoint was tested once on 100 entirely fresh seeds:
+
+  Mean score:    42.08
+  Median score:  29.5
+  Minimum score: 3
+  Maximum score: 200
+
+Saved models:
+
+  models/lidar_dqn_scratch.zip       Original baseline
+  models/lidar_dqn_improved.zip      Accepted improved agent
+
+Commands:
+
+  python lidar_dqn_agent.py play
+  python lidar_dqn_agent.py evaluate --episodes 100 --score-limit 200
+  python lidar_dqn_agent.py train --steps 500000 --fresh
+
+The LIDAR agent now exceeds the compact DQN's measured mean, although the tests
+use different unseen seed ranges. Both learned agents remain far below the
+model-based planner's reliability.
+
+
+10. Which agent should be used?
+-------------------------------
 
 Use the planner when the goal is the highest score and reliable play. Use the
 scratch Double DQN when the goal is to study an agent that genuinely learns by
-trial and error. Use original PPO as a simple policy-gradient baseline, and use
-improved PPO to study how expert demonstrations can help an RL policy.
+trial and error from efficient state features. Use the LIDAR Double DQN to study
+learning from raw range sensors and temporal observations. Use original PPO as
+a simple policy-gradient baseline, and use improved PPO to study how expert
+demonstrations can help an RL policy.
 
-The DQN result is much stronger than both PPO results, but it does not yet meet
-the planner's mean-above-500 target. Reaching that level with a purely learned
-agent would require more training, checkpoint selection, and likely a training
-curriculum or stronger replay strategy.
+The learned DQN agents are much stronger than both PPO results, but they do not
+meet the planner's mean-above-500 target. Reaching that level with a purely
+learned agent would likely require a new improvement beyond the rejected
+components in this ablation.
