@@ -1,0 +1,282 @@
+FLAPPY BIRD AGENTS - METHOD EXPLANATION
+=======================================
+
+1. Shared 12-value observation
+------------------------------
+
+All agents described here use the compact observation mode (use_lidar=False).
+They do not use the 180 LIDAR rays or screen pixels.
+
+The 12 values are:
+
+  - Three values for each of three pipes:
+      1. Horizontal pipe position
+      2. Top of the opening
+      3. Bottom of the opening
+
+  - Bird vertical position
+  - Bird vertical velocity
+  - Bird rotation
+
+The values are normalized. The vertical velocity makes this observation a much
+better learning state than a single LIDAR frame, which does not explicitly say
+whether the bird is moving up or down.
+
+game_env.py contains the shared environment setup. Training runs without a game
+window for speed; play mode creates a visible window.
+
+
+2. Agent summary
+----------------
+
+This project contains four agent variants:
+
+  1. Original PPO (main.py)
+     A neural-network reinforcement-learning baseline trained from scratch.
+
+  2. Improved PPO (ppo_agent.py)
+     A PPO policy first taught to imitate the planner, then fine-tuned with
+     reinforcement learning. It is not a from-scratch agent.
+
+  3. Model-based planner (compact_planner.py and planner_agent.py)
+     A search algorithm that uses the known game physics. It does not learn.
+
+  4. Scratch Double DQN (dqn_agent.py)
+     A new neural-network agent that learns only through game interaction. Its
+     random exploration is biased toward action 0 (idle), instead of using the
+     poor 50/50 idle/flap distribution.
+
+
+3. Original PPO agent
+---------------------
+
+PPO means Proximal Policy Optimization. It learns a policy that directly gives
+probabilities for idle and flap, plus a value estimate of how promising the
+current situation is.
+
+The original agent in main.py uses the raw 12 values and two hidden layers of
+128 neurons. Eight games run in parallel during training. A shaped reward gives
+positive feedback for surviving and passing a pipe, negative feedback for
+dying, and a small hint that favors being close to the upcoming gap center.
+
+This is an on-policy method: after collecting a batch of recent experience, PPO
+updates the policy and then collects new experience. Its clipping rule prevents
+individual updates from changing the policy too abruptly.
+
+Saved model:
+
+  models/compact_ppo.zip
+
+Measured result over the comparison seeds:
+
+  Mean score:    5.30
+  Median score:  4
+  Maximum score: 28
+
+Commands:
+
+  python main.py train --steps 500000
+  python main.py evaluate --episodes 50
+  python main.py play
+
+
+4. Improved PPO agent
+---------------------
+
+The improved agent in ppo_agent.py uses a larger 256-by-256 neural network and
+has two training stages:
+
+  1. The planner generates example observations and actions.
+  2. Supervised imitation learning teaches PPO to copy those actions.
+  3. PPO reinforcement learning then fine-tunes the copied policy using actual
+     game rewards.
+
+Class weighting is used during imitation because idle occurs much more often
+than flap. Without it, a network could appear accurate by predicting idle too
+often. The intermediate imitation model and final model are saved separately.
+
+Saved models:
+
+  models/compact_ppo_pretrained.zip
+  models/compact_ppo_improved.zip
+
+Measured result over the same 50 comparison seeds:
+
+  Mean score:    6.76
+  Median score:  4
+  Maximum score: 38
+
+Commands:
+
+  python ppo_agent.py train --steps 500000
+  python ppo_agent.py evaluate --episodes 50 --score-limit 200
+  python ppo_agent.py play
+
+
+5. Model-based planner agent
+----------------------------
+
+The high-scoring planner is not a neural network. It reads the 12 values and
+simulates possible future flap sequences with the exact game rules:
+
+  - Action 0 means idle.
+  - Action 1 means flap.
+  - A flap sets vertical velocity to -9.
+  - Otherwise gravity adds 1, up to a falling speed of 10.
+  - The bird moves by its updated velocity.
+  - Pipes move left by 4 pixels per step.
+
+At every simulated frame, trajectories that hit the top, ground, or a pipe are
+discarded. The search keeps the best 200 remaining states rather than every
+possible action sequence. This is called beam search.
+
+Safe trajectories are ranked by gap alignment, vertical speed, and unnecessary
+flaps. The target within the current gap is adjusted toward the following gap,
+which helps with difficult height transitions. The planner replans when it runs
+out of planned actions or a previously hidden pipe becomes visible.
+
+If no safe search result exists, a small emergency controller aims for the next
+gap center and flaps only when the bird is low and descending.
+
+The planner performs best because the game is deterministic, its physics are
+known, and it has only two actions. Its trade-off is computation: a wider search
+is safer but slower.
+
+Verified over five unseen seeds with a score limit of 1,100:
+
+  Mean score:          810.60
+  Median score:       1100
+  Minimum score:       176
+  Maximum score:      1100
+  Runs reaching 1100:  60 percent
+
+Commands:
+
+  python planner_agent.py
+  python planner_agent.py evaluate --episodes 5 --score-limit 1100
+
+
+6. Scratch Double DQN agent
+---------------------------
+
+The new agent in dqn_agent.py learns from an empty replay memory and randomly
+initialized neural-network weights. It receives no planner demonstrations and
+does not read the physics code.
+
+DQN means Deep Q-Network. For each state, the network estimates two Q-values:
+
+  Q(state, idle)
+  Q(state, flap)
+
+The larger value is the action expected to lead to more future reward. The
+network has two hidden layers of 256 neurons.
+
+The agent stores transitions in a replay memory containing up to 100,000 game
+steps. It learns from random batches of 128 stored transitions. Replay reuses
+experience and mixes old and new situations, making DQN more sample-efficient
+than learning only from the latest trajectory.
+
+This implementation uses Double DQN. The current network selects the best next
+action, while a slower target network evaluates that action. Separating these
+two jobs reduces the optimistic value errors that can occur in ordinary DQN.
+The target network is refreshed every 2,000 steps.
+
+
+7. DQN observation preparation and reward
+-----------------------------------------
+
+The observation remains exactly 12 numbers, but dqn_agent.py makes it easier
+for a small network to learn:
+
+  - It puts the upcoming pipe first.
+  - Pipe horizontal positions become distances relative to the bird.
+  - Gap boundaries become vertical distances relative to the bird center.
+  - Bird position, vertical velocity, and rotation remain present.
+
+This representation means similar situations look similar even when the pipe
+array rotates or the whole scene is at another screen position.
+
+The DQN training reward is:
+
+  - Death: -5
+  - Passing a pipe: +5
+  - Other steps: 0.1 minus the distance from a useful point in the next gap
+
+The score used for final evaluation is still the real number of passed pipes.
+Reward shaping only supplies denser feedback while learning.
+
+
+8. Biased DQN exploration
+-------------------------
+
+At the start of training, DQN explores often. Instead of choosing randomly with
+a 50/50 split, its random actions use a configurable flap probability. For
+example, 20 percent means:
+
+  - 80 percent of random actions are idle.
+  - 20 percent of random actions are flap.
+
+This bias is used both before learning begins and during epsilon exploration.
+The probability of taking a random action decreases from 100 percent to 5
+percent during the first half of training. After that, 5 percent exploration is
+retained. The learned policy is used without randomness during evaluation.
+
+Three independent agents were trained from scratch for 300,000 steps each and
+tested on the same 30 unseen seeds with a score limit of 200:
+
+  Random idle/flap     Mean    Median    Min    Max
+  ----------------    ------   ------    ---    ---
+  90% / 10%            35.33    24.0      4      97
+  80% / 20%            37.90    28.5      2     137
+  70% / 30%             3.57     2.0      0      19
+
+The 80/20 exploration mix won. A larger final test of that model over 100 unseen
+seeds produced:
+
+  Mean score:    33.73
+  Median score: 25
+  Minimum score: 2
+  Maximum score: 158
+
+The 70/30 result shows that excessive random flapping can make exploration much
+less useful. The result also supports avoiding 50/50, which would be even more
+aggressive. Because neural-network training is stochastic, exact results can
+vary between new training runs.
+
+Saved models:
+
+  models/dqn_scratch_flap_10.zip
+  models/dqn_scratch_flap_20.zip
+  models/dqn_scratch_flap_30.zip
+  models/dqn_scratch_best.zip       (copy of the winning 80/20 model)
+
+Commands:
+
+  Play the best DQN:
+    python dqn_agent.py play
+
+  Evaluate it:
+    python dqn_agent.py evaluate --episodes 100 --score-limit 200
+
+  Repeat all three scratch experiments:
+    python dqn_agent.py experiment --flap-probabilities 0.1 0.2 0.3 --steps 300000
+
+  Train only a fresh 80/20 agent:
+    python dqn_agent.py train --flap-probability 0.2 --steps 300000 --fresh
+
+  Continue training the existing 80/20 agent:
+    python dqn_agent.py train --flap-probability 0.2 --steps 300000
+
+
+9. Which agent should be used?
+------------------------------
+
+Use the planner when the goal is the highest score and reliable play. Use the
+scratch Double DQN when the goal is to study an agent that genuinely learns by
+trial and error. Use original PPO as a simple policy-gradient baseline, and use
+improved PPO to study how expert demonstrations can help an RL policy.
+
+The DQN result is much stronger than both PPO results, but it does not yet meet
+the planner's mean-above-500 target. Reaching that level with a purely learned
+agent would require more training, checkpoint selection, and likely a training
+curriculum or stronger replay strategy.
